@@ -14,9 +14,7 @@ st.set_page_config(page_title="USDJPY 15pips AI", layout="wide", initial_sidebar
 # CSS設定
 st.markdown("""
     <style>
-    /* 上部の余白調整 */
     .block-container { padding-top: 3rem; padding-bottom: 2rem; padding-left: 1rem; padding-right: 1rem; }
-    
     .title-text { font-size: 1.5rem; font-weight: bold; color: #333; margin-bottom: 0px; }
     .stButton { position: fixed; top: 15px; right: 15px; z-index: 999; }
     .big-rate { font-size: 3rem !important; font-weight: bold; text-align: center; color: #333; margin-top: 10px; margin-bottom: 0px; }
@@ -31,7 +29,6 @@ st.markdown("""
     .total-pips { font-size: 1.2rem; font-weight: bold; text-align: center; margin-top: 5px; }
     .plus-pips { color: #00cc66; }
     .minus-pips { color: #ff3333; }
-    
     .reason-box { background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 10px; padding: 15px; margin-top: 20px; }
     .reason-title { font-weight: bold; font-size: 1.1rem; margin-bottom: 10px; color: #444; border-bottom: 2px solid #ddd; padding-bottom: 5px; }
     .reason-item { margin-bottom: 8px; font-size: 0.95rem; line-height: 1.5; }
@@ -45,7 +42,7 @@ st.markdown("""
 # --- 関数: データ取得 ---
 def get_data_and_features():
     ticker = "USDJPY=X"
-    # データ量確保
+    # SMA200を計算するために少し長めに取る
     df = yf.download(ticker, period="7d", interval="5m", progress=False)
     
     if df.empty: return None
@@ -65,6 +62,13 @@ def get_data_and_features():
     df['MACD_Hist'] = macd.iloc[:, 2]
     df['SMA20'] = df.ta.sma(length=20)
     df['SMA20_Disp'] = (df['Close'] - df['SMA20']) / df['SMA20'] * 100
+    
+    # ★追加: 長期トレンド判断用 SMA200
+    df['SMA200'] = df.ta.sma(length=200)
+    
+    # ★追加: ADX (トレンドの強さ)
+    adx = df.ta.adx(length=14)
+    df['ADX'] = adx.iloc[:, 0] # ADX列だけ取得
 
     return df
 
@@ -104,38 +108,36 @@ st.markdown("<div class='title-text'>🇯🇵 USD/JPY 5分足AI</div>", unsafe_a
 update = st.button("更新・判定 🔄", type="primary")
 
 if update or True:
-    with st.spinner('AI学習＆解析中（厳格モード）...'):
+    with st.spinner('AI解析中 (トレンドフィルター適用)...'):
         df = get_data_and_features()
         
         if df is not None:
             df = create_target(df, pips=0.15)
-            features = ['RSI', 'RSI_Diff', 'BB_Pb', 'BB_Width', 'MACD_Hist', 'SMA20_Disp']
+            # ADXも学習に追加して、トレンドの強さを考慮させる
+            features = ['RSI', 'RSI_Diff', 'BB_Pb', 'BB_Width', 'MACD_Hist', 'SMA20_Disp', 'ADX']
             
-            # 結果が出ている全データ
-            full_data = df.dropna(subset=features + ['Target'])
+            full_data = df.dropna(subset=features + ['Target', 'SMA200']) # SMA200が計算できている部分のみ
             
-            # ★重要修正: 「学習用」と「テスト(グラフ)用」を完全に分ける
-            # 直近120本をテスト用として確保し、学習には一切使わない
             simulation_count = 120
             
             if len(full_data) > simulation_count + 100:
-                # 学習データ: 最初 ～ 120本前まで
                 X_train = full_data[features].iloc[:-simulation_count]
                 y_train = full_data['Target'].iloc[:-simulation_count]
-                
-                # テストデータ: 直近120本（AIにとって未知のデータ）
                 sim_df = full_data.tail(simulation_count).copy()
                 
-                # モデル学習 (過去データのみを使用)
                 model = lgb.LGBMClassifier(n_estimators=100, max_depth=3, random_state=42, verbose=-1)
                 model.fit(X_train, y_train)
                 
-                # --- 1. 現在のリアルタイム判定 ---
-                # 最新の足は学習にもテストにも含まれていないので、学習済みモデルで予測するだけ
+                # --- 現在の判定 ---
                 target_row_idx = -2
                 target_data = df.iloc[[target_row_idx]] 
                 current_rate = target_data['Close'].item()
                 target_time = target_data.index[0].replace(tzinfo=pytz.utc).astimezone(jst)
+                
+                # 長期トレンド判定
+                current_sma200 = target_data['SMA200'].item()
+                trend_filter_up = current_rate > current_sma200
+                trend_filter_down = current_rate < current_sma200
                 
                 prob = model.predict_proba(target_data[features])[0]
                 prob_up = int(prob[1] * 100)
@@ -155,28 +157,37 @@ if update or True:
                 </div>
                 """, unsafe_allow_html=True)
                 
-                threshold = 73
+                # ★修正: 基準値を75%に引き上げ
+                threshold = 75
                 decision = "WAIT"
                 css_class = "decision-wait"
                 
+                # ★修正: トレンドフィルター適用
+                # AIがGOと言っても、長期トレンド(SMA200)に逆らっていたら強制WAIT
                 if prob_up >= threshold:
-                    decision = "UP 狙い"
-                    css_class = "decision-up"
+                    if trend_filter_up:
+                        decision = "UP 狙い"
+                        css_class = "decision-up"
+                    else:
+                        decision = "WAIT (逆張り注意)"
                 elif prob_down >= threshold:
-                    decision = "DOWN 狙い"
-                    css_class = "decision-down"
+                    if trend_filter_down:
+                        decision = "DOWN 狙い"
+                        css_class = "decision-down"
+                    else:
+                        decision = "WAIT (逆張り注意)"
                     
                 st.markdown(f"<div class='decision-text {css_class}'>{decision}</div>", unsafe_allow_html=True)
-                st.markdown("<div style='text-align:center; color:#888; font-size:0.8rem;'>目標: ±15pips / 基準値: 73%</div>", unsafe_allow_html=True)
+                # 注釈も更新
+                st.markdown(f"<div style='text-align:center; color:#888; font-size:0.8rem;'>目標: ±15pips / 基準値: {threshold}% + SMA200フィルター</div>", unsafe_allow_html=True)
 
                 st.markdown("---")
                 
-                # --- 2. グラフ表示（完全な未知データテスト） ---
+                # --- グラフ表示 ---
                 st.subheader("📊 直近の戦績 (確定分120本)")
-                st.markdown(f"<div class='condition-note'>※ 厳格モード: 学習に使っていない未知データでの成績を表示中</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='condition-note'>※ 厳格モード: 未知データ + トレンド順張り限定</div>", unsafe_allow_html=True)
 
                 if not sim_df.empty:
-                    # 未知データに対して予測を実行
                     sim_probs = model.predict_proba(sim_df[features])
                     sim_df['Prob_Up'] = sim_probs[:, 1]
                     
@@ -185,10 +196,18 @@ if update or True:
                     
                     for i in range(len(sim_df)):
                         p_up = sim_df['Prob_Up'].iloc[i] * 100
+                        p_down = 100 - p_up
                         actual = sim_df['Target'].iloc[i]
+                        close_price = sim_df['Close'].iloc[i]
+                        sma200_val = sim_df['SMA200'].iloc[i]
+                        
+                        # シミュレーションでもフィルターを適用
                         res = 0
-                        if p_up >= threshold: res = 15 if actual==1 else -15
-                        elif p_up <= (100-threshold): res = 15 if actual==0 else -15
+                        if p_up >= threshold and close_price > sma200_val: # 買い & トレンド上
+                            res = 15 if actual==1 else -15
+                        elif p_down >= threshold and close_price < sma200_val: # 売り & トレンド下
+                            res = 15 if actual==0 else -15
+                        
                         total_pips += res
                         pips_history.append(total_pips)
                     
@@ -197,15 +216,9 @@ if update or True:
 
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(y=pips_history, mode='lines', line=dict(color='#333', width=3)))
-                    
                     fig.update_layout(
-                        margin=dict(l=10, r=10, t=10, b=30),
-                        height=180,
-                        showlegend=False,
-                        xaxis=dict(
-                            visible=True, showgrid=False, tickmode='linear',
-                            tick0=0, dtick=20, fixedrange=True
-                        ),
+                        margin=dict(l=10, r=10, t=10, b=30), height=180, showlegend=False,
+                        xaxis=dict(visible=True, showgrid=False, tickmode='linear', tick0=0, dtick=20, fixedrange=True),
                         yaxis=dict(showgrid=True, gridcolor='#eee')
                     )
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
@@ -214,6 +227,10 @@ if update or True:
                 st.markdown("<div class='reason-box'>", unsafe_allow_html=True)
                 st.markdown("<div class='reason-title'>📝 AI判断材料 (インジケーター一覧)</div>", unsafe_allow_html=True)
                 
+                # トレンド情報の表示追加
+                trend_str = "<span class='tag-up'>上昇トレンド</span>" if trend_filter_up else "<span class='tag-down'>下降トレンド</span>"
+                st.markdown(f"<div class='reason-item'><b>長期トレンド (SMA200)</b>: {trend_str} (これに逆らう売買は回避)</div>", unsafe_allow_html=True)
+
                 # RSI
                 rsi_val = target_data['RSI'].item()
                 rsi_status = "<span class='tag-mid'>中立</span>"
@@ -224,25 +241,16 @@ if update or True:
                 # SMA
                 sma_val = target_data['SMA20_Disp'].item()
                 sma_status = "<span class='tag-mid'>レンジ気味</span>"
-                if sma_val > 0.05: sma_status = "<span class='tag-up'>上昇トレンド (SMAより上)</span>"
-                elif sma_val < -0.05: sma_status = "<span class='tag-down'>下降トレンド (SMAより下)</span>"
-                st.markdown(f"<div class='reason-item'><b>移動平均線 (20)</b>: 乖離{sma_val:.2f}% → {sma_status}</div>", unsafe_allow_html=True)
+                if sma_val > 0.05: sma_status = "<span class='tag-up'>短期上昇</span>"
+                elif sma_val < -0.05: sma_status = "<span class='tag-down'>短期下降</span>"
+                st.markdown(f"<div class='reason-item'><b>短期移動平均 (20)</b>: 乖離{sma_val:.2f}% → {sma_status}</div>", unsafe_allow_html=True)
 
                 # BB
                 bb_pb = target_data['BB_Pb'].item()
-                bb_status = "<span class='tag-mid'>バンド内推移</span>"
-                if bb_pb > 1.0: bb_status = "<span class='tag-up'>+2σブレイク (強気)</span>"
-                elif bb_pb < 0.0: bb_status = "<span class='tag-down'>-2σブレイク (弱気)</span>"
-                elif bb_pb > 0.8: bb_status = "<span class='tag-up'>高値圏</span>"
-                elif bb_pb < 0.2: bb_status = "<span class='tag-down'>安値圏</span>"
+                bb_status = "<span class='tag-mid'>バンド内</span>"
+                if bb_pb > 1.0: bb_status = "<span class='tag-up'>+2σブレイク</span>"
+                elif bb_pb < 0.0: bb_status = "<span class='tag-down'>-2σブレイク</span>"
                 st.markdown(f"<div class='reason-item'><b>ボリンジャーバンド</b>: 位置{bb_pb:.2f} → {bb_status}</div>", unsafe_allow_html=True)
-
-                # MACD
-                macd_val = target_data['MACD_Hist'].item()
-                macd_status = "<span class='tag-mid'>中立</span>"
-                if macd_val > 0.005: macd_status = "<span class='tag-up'>買い優勢</span>"
-                elif macd_val < -0.005: macd_status = "<span class='tag-down'>売り優勢</span>"
-                st.markdown(f"<div class='reason-item'><b>MACD</b>: ヒストグラム{macd_val:.3f} → {macd_status}</div>", unsafe_allow_html=True)
                 
                 st.markdown("</div>", unsafe_allow_html=True)
 
