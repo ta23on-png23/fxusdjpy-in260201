@@ -14,7 +14,9 @@ st.set_page_config(page_title="USDJPY 15pips AI", layout="wide", initial_sidebar
 # CSS設定
 st.markdown("""
     <style>
-    .block-container { padding: 1rem; }
+    /* ★修正: 上部の余白を1remから3remに増やして見切れを防止 */
+    .block-container { padding-top: 3rem; padding-bottom: 2rem; padding-left: 1rem; padding-right: 1rem; }
+    
     .title-text { font-size: 1.5rem; font-weight: bold; color: #333; margin-bottom: 0px; }
     .stButton { position: fixed; top: 15px; right: 15px; z-index: 999; }
     .big-rate { font-size: 3rem !important; font-weight: bold; text-align: center; color: #333; margin-top: 10px; margin-bottom: 0px; }
@@ -30,7 +32,6 @@ st.markdown("""
     .plus-pips { color: #00cc66; }
     .minus-pips { color: #ff3333; }
     
-    /* 根拠表示エリアのスタイル */
     .reason-box { background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 10px; padding: 15px; margin-top: 20px; }
     .reason-title { font-weight: bold; font-size: 1.1rem; margin-bottom: 10px; color: #444; border-bottom: 2px solid #ddd; padding-bottom: 5px; }
     .reason-item { margin-bottom: 8px; font-size: 0.95rem; line-height: 1.5; }
@@ -182,28 +183,43 @@ if update or True:
 
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(y=pips_history, mode='lines', line=dict(color='#333', width=3)))
-                    fig.update_layout(margin=dict(l=10, r=10, t=10, b=20), height=150, showlegend=False, xaxis=dict(visible=False), yaxis=dict(showgrid=True, gridcolor='#eee'))
+                    
+                    # ★修正: X軸(0, 5, 10...)を表示
+                    fig.update_layout(
+                        margin=dict(l=10, r=10, t=10, b=30),
+                        height=180,
+                        showlegend=False,
+                        xaxis=dict(
+                            visible=True,
+                            showgrid=False,
+                            tickmode='linear',
+                            tick0=0,
+                            dtick=5,
+                            fixedrange=True
+                        ),
+                        yaxis=dict(showgrid=True, gridcolor='#eee')
+                    )
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-                # --- ★改善機能: 使用インジケーター全リスト表示 ---
+                # --- インジケーター全リスト ---
                 st.markdown("<div class='reason-box'>", unsafe_allow_html=True)
                 st.markdown("<div class='reason-title'>📝 AI判断材料 (インジケーター一覧)</div>", unsafe_allow_html=True)
                 
-                # --- 1. RSI ---
+                # RSI
                 rsi_val = target_data['RSI'].item()
                 rsi_status = "<span class='tag-mid'>中立</span>"
                 if rsi_val > 60: rsi_status = "<span class='tag-up'>上昇圏</span>"
                 elif rsi_val < 40: rsi_status = "<span class='tag-down'>下降圏</span>"
                 st.markdown(f"<div class='reason-item'><b>RSI (14)</b>: {rsi_val:.1f} → {rsi_status}</div>", unsafe_allow_html=True)
                 
-                # --- 2. SMA乖離 ---
+                # SMA
                 sma_val = target_data['SMA20_Disp'].item()
                 sma_status = "<span class='tag-mid'>レンジ気味</span>"
                 if sma_val > 0.05: sma_status = "<span class='tag-up'>上昇トレンド (SMAより上)</span>"
                 elif sma_val < -0.05: sma_status = "<span class='tag-down'>下降トレンド (SMAより下)</span>"
                 st.markdown(f"<div class='reason-item'><b>移動平均線 (20)</b>: 乖離{sma_val:.2f}% → {sma_status}</div>", unsafe_allow_html=True)
 
-                # --- 3. ボリンジャーバンド ---
+                # BB
                 bb_pb = target_data['BB_Pb'].item()
                 bb_status = "<span class='tag-mid'>バンド内推移</span>"
                 if bb_pb > 1.0: bb_status = "<span class='tag-up'>+2σブレイク (強気)</span>"
@@ -212,7 +228,7 @@ if update or True:
                 elif bb_pb < 0.2: bb_status = "<span class='tag-down'>安値圏</span>"
                 st.markdown(f"<div class='reason-item'><b>ボリンジャーバンド</b>: 位置{bb_pb:.2f} → {bb_status}</div>", unsafe_allow_html=True)
 
-                # --- 4. MACD ---
+                # MACD
                 macd_val = target_data['MACD_Hist'].item()
                 macd_status = "<span class='tag-mid'>中立</span>"
                 if macd_val > 0.005: macd_status = "<span class='tag-up'>買い優勢</span>"
@@ -220,7 +236,6 @@ if update or True:
                 st.markdown(f"<div class='reason-item'><b>MACD</b>: ヒストグラム{macd_val:.3f} → {macd_status}</div>", unsafe_allow_html=True)
                 
                 st.markdown("</div>", unsafe_allow_html=True)
-                # ----------------------------------------
 
             else:
                 st.warning("データ不足")
