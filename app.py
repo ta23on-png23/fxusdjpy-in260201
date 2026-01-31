@@ -14,7 +14,7 @@ st.set_page_config(page_title="USDJPY 15pips AI", layout="wide", initial_sidebar
 # CSS設定
 st.markdown("""
     <style>
-    /* ★修正: 上部の余白を1remから3remに増やして見切れを防止 */
+    /* 上部の余白調整 */
     .block-container { padding-top: 3rem; padding-bottom: 2rem; padding-left: 1rem; padding-right: 1rem; }
     
     .title-text { font-size: 1.5rem; font-weight: bold; color: #333; margin-bottom: 0px; }
@@ -44,6 +44,7 @@ st.markdown("""
 # --- 関数: データ取得 ---
 def get_data_and_features():
     ticker = "USDJPY=X"
+    # 7日分まとめて取得（ここが通信時間のボトルネックだが、120本でも変わらない）
     df = yf.download(ticker, period="7d", interval="5m", progress=False)
     
     if df.empty: return None
@@ -69,6 +70,7 @@ def get_data_and_features():
 # --- 関数: 正解ラベル作成 ---
 def create_target(df, pips=0.15):
     targets = []
+    # 直近1500本分だけ計算（一瞬で終わる）
     scan_start = max(0, len(df) - 1500)
     
     for i in range(len(df)):
@@ -157,12 +159,13 @@ if update or True:
 
                 st.markdown("---")
                 
-                # グラフ
-                st.subheader("📊 直近の戦績 (確定分30本)")
+                # --- グラフ表示（120本） ---
+                st.subheader("📊 直近の戦績 (確定分120本)")
                 valid_history_df = df.dropna(subset=['Target'])
                 
                 if not valid_history_df.empty:
-                    sim_df = valid_history_df.tail(30).copy()
+                    # ★修正: 30本 -> 120本に変更
+                    sim_df = valid_history_df.tail(120).copy()
                     sim_probs = model.predict_proba(sim_df[features])
                     sim_df['Prob_Up'] = sim_probs[:, 1]
                     
@@ -184,7 +187,7 @@ if update or True:
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(y=pips_history, mode='lines', line=dict(color='#333', width=3)))
                     
-                    # ★修正: X軸(0, 5, 10...)を表示
+                    # ★修正: 目盛りを20本刻みに変更
                     fig.update_layout(
                         margin=dict(l=10, r=10, t=10, b=30),
                         height=180,
@@ -194,7 +197,7 @@ if update or True:
                             showgrid=False,
                             tickmode='linear',
                             tick0=0,
-                            dtick=5,
+                            dtick=20, # 20, 40, 60...と表示
                             fixedrange=True
                         ),
                         yaxis=dict(showgrid=True, gridcolor='#eee')
