@@ -38,13 +38,14 @@ st.markdown("""
     .tag-up { color: #00cc66; font-weight: bold; background: #e6fffa; padding: 2px 6px; border-radius: 4px; }
     .tag-down { color: #ff3333; font-weight: bold; background: #ffe6e6; padding: 2px 6px; border-radius: 4px; }
     .tag-mid { color: #666; font-weight: bold; background: #eee; padding: 2px 6px; border-radius: 4px; }
+    .condition-note { font-size: 0.9rem; color: #666; margin-bottom: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
 # --- 関数: データ取得 ---
 def get_data_and_features():
     ticker = "USDJPY=X"
-    # 7日分まとめて取得（ここが通信時間のボトルネックだが、120本でも変わらない）
+    # データ量確保
     df = yf.download(ticker, period="7d", interval="5m", progress=False)
     
     if df.empty: return None
@@ -70,7 +71,6 @@ def get_data_and_features():
 # --- 関数: 正解ラベル作成 ---
 def create_target(df, pips=0.15):
     targets = []
-    # 直近1500本分だけ計算（一瞬で終わる）
     scan_start = max(0, len(df) - 1500)
     
     for i in range(len(df)):
@@ -104,22 +104,34 @@ st.markdown("<div class='title-text'>🇯🇵 USD/JPY 5分足AI</div>", unsafe_a
 update = st.button("更新・判定 🔄", type="primary")
 
 if update or True:
-    with st.spinner('AI解析中...'):
+    with st.spinner('AI学習＆解析中（厳格モード）...'):
         df = get_data_and_features()
         
         if df is not None:
             df = create_target(df, pips=0.15)
             features = ['RSI', 'RSI_Diff', 'BB_Pb', 'BB_Width', 'MACD_Hist', 'SMA20_Disp']
-            train_df = df.dropna(subset=features + ['Target'])
             
-            if len(train_df) > 50:
-                X = train_df[features]
-                y = train_df['Target']
+            # 結果が出ている全データ
+            full_data = df.dropna(subset=features + ['Target'])
+            
+            # ★重要修正: 「学習用」と「テスト(グラフ)用」を完全に分ける
+            # 直近120本をテスト用として確保し、学習には一切使わない
+            simulation_count = 120
+            
+            if len(full_data) > simulation_count + 100:
+                # 学習データ: 最初 ～ 120本前まで
+                X_train = full_data[features].iloc[:-simulation_count]
+                y_train = full_data['Target'].iloc[:-simulation_count]
                 
+                # テストデータ: 直近120本（AIにとって未知のデータ）
+                sim_df = full_data.tail(simulation_count).copy()
+                
+                # モデル学習 (過去データのみを使用)
                 model = lgb.LGBMClassifier(n_estimators=100, max_depth=3, random_state=42, verbose=-1)
-                model.fit(X, y)
+                model.fit(X_train, y_train)
                 
-                # 判定用データ
+                # --- 1. 現在のリアルタイム判定 ---
+                # 最新の足は学習にもテストにも含まれていないので、学習済みモデルで予測するだけ
                 target_row_idx = -2
                 target_data = df.iloc[[target_row_idx]] 
                 current_rate = target_data['Close'].item()
@@ -159,13 +171,12 @@ if update or True:
 
                 st.markdown("---")
                 
-                # --- グラフ表示（120本） ---
+                # --- 2. グラフ表示（完全な未知データテスト） ---
                 st.subheader("📊 直近の戦績 (確定分120本)")
-                valid_history_df = df.dropna(subset=['Target'])
-                
-                if not valid_history_df.empty:
-                    # ★修正: 30本 -> 120本に変更
-                    sim_df = valid_history_df.tail(120).copy()
+                st.markdown(f"<div class='condition-note'>※ 厳格モード: 学習に使っていない未知データでの成績を表示中</div>", unsafe_allow_html=True)
+
+                if not sim_df.empty:
+                    # 未知データに対して予測を実行
                     sim_probs = model.predict_proba(sim_df[features])
                     sim_df['Prob_Up'] = sim_probs[:, 1]
                     
@@ -187,18 +198,13 @@ if update or True:
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(y=pips_history, mode='lines', line=dict(color='#333', width=3)))
                     
-                    # ★修正: 目盛りを20本刻みに変更
                     fig.update_layout(
                         margin=dict(l=10, r=10, t=10, b=30),
                         height=180,
                         showlegend=False,
                         xaxis=dict(
-                            visible=True,
-                            showgrid=False,
-                            tickmode='linear',
-                            tick0=0,
-                            dtick=20, # 20, 40, 60...と表示
-                            fixedrange=True
+                            visible=True, showgrid=False, tickmode='linear',
+                            tick0=0, dtick=20, fixedrange=True
                         ),
                         yaxis=dict(showgrid=True, gridcolor='#eee')
                     )
