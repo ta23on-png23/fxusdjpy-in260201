@@ -1,6 +1,5 @@
 import streamlit as st
 import yfinance as yf
-import pandas_ta as ta
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -9,7 +8,7 @@ from datetime import datetime, timedelta
 import pytz
 
 # --- ページ設定 ---
-st.set_page_config(page_title="USDJPY 15pips AI", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="USDJPY Pure AI", layout="wide", initial_sidebar_state="collapsed")
 
 # CSS設定
 st.markdown("""
@@ -29,20 +28,17 @@ st.markdown("""
     .total-pips { font-size: 1.2rem; font-weight: bold; text-align: center; margin-top: 5px; }
     .plus-pips { color: #00cc66; }
     .minus-pips { color: #ff3333; }
+    .condition-note { font-size: 0.9rem; color: #666; margin-bottom: 10px; }
     .reason-box { background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 10px; padding: 15px; margin-top: 20px; }
     .reason-title { font-weight: bold; font-size: 1.1rem; margin-bottom: 10px; color: #444; border-bottom: 2px solid #ddd; padding-bottom: 5px; }
     .reason-item { margin-bottom: 8px; font-size: 0.95rem; line-height: 1.5; }
-    .tag-up { color: #00cc66; font-weight: bold; background: #e6fffa; padding: 2px 6px; border-radius: 4px; }
-    .tag-down { color: #ff3333; font-weight: bold; background: #ffe6e6; padding: 2px 6px; border-radius: 4px; }
-    .tag-mid { color: #666; font-weight: bold; background: #eee; padding: 2px 6px; border-radius: 4px; }
-    .condition-note { font-size: 0.9rem; color: #666; margin-bottom: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
 # --- 関数: データ取得 ---
-def get_data_and_features():
+def get_data():
     ticker = "USDJPY=X"
-    # SMA200を計算するために少し長めに取る
+    # データ量確保
     df = yf.download(ticker, period="7d", interval="5m", progress=False)
     
     if df.empty: return None
@@ -51,26 +47,35 @@ def get_data_and_features():
         df.columns = df.columns.get_level_values(0)
 
     df = df.copy()
-    
-    # 特徴量作成
-    df['RSI'] = df.ta.rsi(length=14)
-    df['RSI_Diff'] = df['RSI'].diff()
-    bb = df.ta.bbands(length=20, std=2)
-    df['BB_Pb'] = (df['Close'] - bb.iloc[:, 2]) / (bb.iloc[:, 0] - bb.iloc[:, 2])
-    df['BB_Width'] = (bb.iloc[:, 0] - bb.iloc[:, 2]) / bb.iloc[:, 1]
-    macd = df.ta.macd(fast=12, slow=26, signal=9)
-    df['MACD_Hist'] = macd.iloc[:, 2]
-    df['SMA20'] = df.ta.sma(length=20)
-    df['SMA20_Disp'] = (df['Close'] - df['SMA20']) / df['SMA20'] * 100
-    
-    # ★追加: 長期トレンド判断用 SMA200
-    df['SMA200'] = df.ta.sma(length=200)
-    
-    # ★追加: ADX (トレンドの強さ)
-    adx = df.ta.adx(length=14)
-    df['ADX'] = adx.iloc[:, 0] # ADX列だけ取得
-
     return df
+
+# --- 関数: 特徴量作成 (インジケーターなし・形状認識) ---
+def create_features(df):
+    df = df.copy()
+    
+    # AIに「チャートの形」を教えるための処理
+    # 過去12本（1時間分）の「値動きの比率」を計算
+    # Log Return (対数収益率) を使うことで、130円でも150円でも同じ「形」として認識させる
+    
+    lags = 12 # 過去12本分を見る
+    cols = []
+    
+    for i in range(1, lags + 1):
+        col_name = f'Lag_{i}'
+        # (今の終値 - i本前の終値) / i本前の終値 * 10000 (pips換算に近い値)
+        df[col_name] = np.log(df['Close'] / df['Close'].shift(i)) * 10000
+        cols.append(col_name)
+        
+    # 現在の足の実体の大きさ (勢い)
+    df['Body_Size'] = np.log(df['Close'] / df['Open']) * 10000
+    
+    # ヒゲの長さ（反発の強さ）
+    df['Upper_Shadow'] = np.log(df['High'] / df[['Close', 'Open']].max(axis=1)) * 10000
+    df['Lower_Shadow'] = np.log(df[['Close', 'Open']].min(axis=1) / df['Low']) * 10000
+    
+    cols.extend(['Body_Size', 'Upper_Shadow', 'Lower_Shadow'])
+    
+    return df, cols
 
 # --- 関数: 正解ラベル作成 ---
 def create_target(df, pips=0.15):
@@ -87,6 +92,7 @@ def create_target(df, pips=0.15):
         target_down = current_close - pips
         
         future_result = np.nan
+        # 15pips動くのに十分な時間（最大4時間）を見る
         for j in range(i + 1, min(len(df), i + 48)):
             future_high = df['High'].iloc[j]
             future_low = df['Low'].iloc[j]
@@ -104,28 +110,29 @@ def create_target(df, pips=0.15):
 # --- メイン処理 ---
 jst = pytz.timezone('Asia/Tokyo')
 
-st.markdown("<div class='title-text'>🇯🇵 USD/JPY 5分足AI</div>", unsafe_allow_html=True)
+st.markdown("<div class='title-text'>🇯🇵 USD/JPY 純粋形状認識AI</div>", unsafe_allow_html=True)
 update = st.button("更新・判定 🔄", type="primary")
 
 if update or True:
-    with st.spinner('AI解析中 (トレンドフィルター適用)...'):
-        df = get_data_and_features()
+    with st.spinner('AIがチャートの形状をパターン認識中...'):
+        df = get_data()
         
         if df is not None:
+            df, features = create_features(df)
             df = create_target(df, pips=0.15)
-            # ADXも学習に追加して、トレンドの強さを考慮させる
-            features = ['RSI', 'RSI_Diff', 'BB_Pb', 'BB_Width', 'MACD_Hist', 'SMA20_Disp', 'ADX']
             
-            full_data = df.dropna(subset=features + ['Target', 'SMA200']) # SMA200が計算できている部分のみ
+            full_data = df.dropna(subset=features + ['Target'])
             
-            simulation_count = 120
+            simulation_count = 120 # 未知データテスト数
             
             if len(full_data) > simulation_count + 100:
+                # 学習用とテスト用を分離
                 X_train = full_data[features].iloc[:-simulation_count]
                 y_train = full_data['Target'].iloc[:-simulation_count]
                 sim_df = full_data.tail(simulation_count).copy()
                 
-                model = lgb.LGBMClassifier(n_estimators=100, max_depth=3, random_state=42, verbose=-1)
+                # インジケーターが無い分、木の深さを深くして複雑なパターンを読めるようにする
+                model = lgb.LGBMClassifier(n_estimators=200, max_depth=7, num_leaves=31, random_state=42, verbose=-1)
                 model.fit(X_train, y_train)
                 
                 # --- 現在の判定 ---
@@ -133,11 +140,6 @@ if update or True:
                 target_data = df.iloc[[target_row_idx]] 
                 current_rate = target_data['Close'].item()
                 target_time = target_data.index[0].replace(tzinfo=pytz.utc).astimezone(jst)
-                
-                # 長期トレンド判定
-                current_sma200 = target_data['SMA200'].item()
-                trend_filter_up = current_rate > current_sma200
-                trend_filter_down = current_rate < current_sma200
                 
                 prob = model.predict_proba(target_data[features])[0]
                 prob_up = int(prob[1] * 100)
@@ -157,35 +159,26 @@ if update or True:
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # ★修正: 基準値を75%に引き上げ
-                threshold = 75
+                # 基準値設定 (形状認識はノイズに強いので少し下げても機能するが、安全のため73%)
+                threshold = 73
                 decision = "WAIT"
                 css_class = "decision-wait"
                 
-                # ★修正: トレンドフィルター適用
-                # AIがGOと言っても、長期トレンド(SMA200)に逆らっていたら強制WAIT
                 if prob_up >= threshold:
-                    if trend_filter_up:
-                        decision = "UP 狙い"
-                        css_class = "decision-up"
-                    else:
-                        decision = "WAIT (逆張り注意)"
+                    decision = "UP 狙い"
+                    css_class = "decision-up"
                 elif prob_down >= threshold:
-                    if trend_filter_down:
-                        decision = "DOWN 狙い"
-                        css_class = "decision-down"
-                    else:
-                        decision = "WAIT (逆張り注意)"
+                    decision = "DOWN 狙い"
+                    css_class = "decision-down"
                     
                 st.markdown(f"<div class='decision-text {css_class}'>{decision}</div>", unsafe_allow_html=True)
-                # 注釈も更新
-                st.markdown(f"<div style='text-align:center; color:#888; font-size:0.8rem;'>目標: ±15pips / 基準値: {threshold}% + SMA200フィルター</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align:center; color:#888; font-size:0.8rem;'>目標: ±15pips / 基準値: {threshold}% (形状認識)</div>", unsafe_allow_html=True)
 
                 st.markdown("---")
                 
                 # --- グラフ表示 ---
                 st.subheader("📊 直近の戦績 (確定分120本)")
-                st.markdown(f"<div class='condition-note'>※ 厳格モード: 未知データ + トレンド順張り限定</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='condition-note'>※ インジケーター不使用：ローソク足の形状パターンのみで判断</div>", unsafe_allow_html=True)
 
                 if not sim_df.empty:
                     sim_probs = model.predict_proba(sim_df[features])
@@ -198,15 +191,10 @@ if update or True:
                         p_up = sim_df['Prob_Up'].iloc[i] * 100
                         p_down = 100 - p_up
                         actual = sim_df['Target'].iloc[i]
-                        close_price = sim_df['Close'].iloc[i]
-                        sma200_val = sim_df['SMA200'].iloc[i]
                         
-                        # シミュレーションでもフィルターを適用
                         res = 0
-                        if p_up >= threshold and close_price > sma200_val: # 買い & トレンド上
-                            res = 15 if actual==1 else -15
-                        elif p_down >= threshold and close_price < sma200_val: # 売り & トレンド下
-                            res = 15 if actual==0 else -15
+                        if p_up >= threshold: res = 15 if actual==1 else -15
+                        elif p_down >= threshold: res = 15 if actual==0 else -15
                         
                         total_pips += res
                         pips_history.append(total_pips)
@@ -223,34 +211,29 @@ if update or True:
                     )
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-                # --- インジケーター全リスト ---
+                # --- 形状分析レポート ---
                 st.markdown("<div class='reason-box'>", unsafe_allow_html=True)
-                st.markdown("<div class='reason-title'>📝 AI判断材料 (インジケーター一覧)</div>", unsafe_allow_html=True)
+                st.markdown("<div class='reason-title'>📝 AI形状分析レポート (直近1時間の動き)</div>", unsafe_allow_html=True)
                 
-                # トレンド情報の表示追加
-                trend_str = "<span class='tag-up'>上昇トレンド</span>" if trend_filter_up else "<span class='tag-down'>下降トレンド</span>"
-                st.markdown(f"<div class='reason-item'><b>長期トレンド (SMA200)</b>: {trend_str} (これに逆らう売買は回避)</div>", unsafe_allow_html=True)
-
-                # RSI
-                rsi_val = target_data['RSI'].item()
-                rsi_status = "<span class='tag-mid'>中立</span>"
-                if rsi_val > 60: rsi_status = "<span class='tag-up'>上昇圏</span>"
-                elif rsi_val < 40: rsi_status = "<span class='tag-down'>下降圏</span>"
-                st.markdown(f"<div class='reason-item'><b>RSI (14)</b>: {rsi_val:.1f} → {rsi_status}</div>", unsafe_allow_html=True)
+                # 直近の動きを言語化
+                last_move = target_data['Lag_1'].item()
+                body_size = target_data['Body_Size'].item()
+                u_shadow = target_data['Upper_Shadow'].item()
+                l_shadow = target_data['Lower_Shadow'].item()
                 
-                # SMA
-                sma_val = target_data['SMA20_Disp'].item()
-                sma_status = "<span class='tag-mid'>レンジ気味</span>"
-                if sma_val > 0.05: sma_status = "<span class='tag-up'>短期上昇</span>"
-                elif sma_val < -0.05: sma_status = "<span class='tag-down'>短期下降</span>"
-                st.markdown(f"<div class='reason-item'><b>短期移動平均 (20)</b>: 乖離{sma_val:.2f}% → {sma_status}</div>", unsafe_allow_html=True)
+                # 1. 直近の勢い
+                if last_move > 0.05: st.markdown("<div class='reason-item'>🚀 <b>直近の足</b>: 強い上昇</div>", unsafe_allow_html=True)
+                elif last_move < -0.05: st.markdown("<div class='reason-item'>🔻 <b>直近の足</b>: 強い下落</div>", unsafe_allow_html=True)
+                else: st.markdown("<div class='reason-item'>➡ <b>直近の足</b>: 停滞/小動き</div>", unsafe_allow_html=True)
 
-                # BB
-                bb_pb = target_data['BB_Pb'].item()
-                bb_status = "<span class='tag-mid'>バンド内</span>"
-                if bb_pb > 1.0: bb_status = "<span class='tag-up'>+2σブレイク</span>"
-                elif bb_pb < 0.0: bb_status = "<span class='tag-down'>-2σブレイク</span>"
-                st.markdown(f"<div class='reason-item'><b>ボリンジャーバンド</b>: 位置{bb_pb:.2f} → {bb_status}</div>", unsafe_allow_html=True)
+                # 2. ヒゲの分析
+                if u_shadow > 0.05: st.markdown("<div class='reason-item'>✋ <b>上ヒゲ検知</b>: 上値が重い (売り圧力あり)</div>", unsafe_allow_html=True)
+                if l_shadow > 0.05: st.markdown("<div class='reason-item'>💪 <b>下ヒゲ検知</b>: 底堅い (買い支えあり)</div>", unsafe_allow_html=True)
+                
+                # 3. 過去1時間の累積
+                cumulative_move = target_data[[f'Lag_{i}' for i in range(1, 13)]].sum(axis=1).item()
+                if cumulative_move > 0.1: st.markdown("<div class='reason-item'>📈 <b>1時間の流れ</b>: 全体的に上昇基調</div>", unsafe_allow_html=True)
+                elif cumulative_move < -0.1: st.markdown("<div class='reason-item'>📉 <b>1時間の流れ</b>: 全体的に下落基調</div>", unsafe_allow_html=True)
                 
                 st.markdown("</div>", unsafe_allow_html=True)
 
